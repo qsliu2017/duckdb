@@ -26,18 +26,21 @@ find_package(Threads REQUIRED)
 
 set(DUCKDB_MODULE_BASE_DIR "${CMAKE_CURRENT_LIST_DIR}")
 
+# Mirrors the Makefile BUILD_DIR knob; baked into local_build_* repository paths.
+if(NOT DEFINED DUCKDB_BUILD_DIR)
+  set(DUCKDB_BUILD_DIR "./build")
+endif()
+string(REGEX REPLACE "/$" "" DUCKDB_BUILD_DIR "${DUCKDB_BUILD_DIR}")
+add_definitions(-DDUCKDB_BUILD_DIR=\"${DUCKDB_BUILD_DIR}\")
+
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 # Copy compile_commands.json into <repo-root>/.cache/clangd/ after every successful build.
 # .cache/ is intentionally outside build/ so it survives `make clean` (which does rm -rf build).
-# The build-type name is derived from the last component of CMAKE_BINARY_DIR, so build dirs must
-# be two levels below the repo root (e.g. build/debug, .cache/clangd/debug) for the repo-root
-# derivation (CMAKE_BINARY_DIR/../..) to be correct. This works in both standalone duckdb builds
-# and extension builds where duckdb/ is a submodule.
+# Use DUCKDB_MODULE_BASE_DIR (not CMAKE_BINARY_DIR/../..) so absolute BUILD_DIR still resolves the repo root.
 if(CMAKE_EXPORT_COMPILE_COMMANDS AND UNIX)
   get_filename_component(_clangd_build_name "${CMAKE_BINARY_DIR}" NAME)
-  get_filename_component(_repo_root "${CMAKE_BINARY_DIR}/../.." ABSOLUTE)
-  set(_clangd_cache_dir "${_repo_root}/.cache/clangd")
+  set(_clangd_cache_dir "${DUCKDB_MODULE_BASE_DIR}/.cache/clangd")
   add_custom_target(clangd_cache ALL
     COMMAND ${CMAKE_COMMAND} -E make_directory "${_clangd_cache_dir}/${_clangd_build_name}"
     COMMAND ${CMAKE_COMMAND} -E copy_if_different

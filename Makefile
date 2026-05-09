@@ -6,7 +6,7 @@ unit: unittest
 
 EXTENSION_CONFIG_STEP ?=
 ifdef USE_MERGED_VCPKG_MANIFEST
-	EXTENSION_CONFIG_STEP = build/extension_configuration/vcpkg.json
+	EXTENSION_CONFIG_STEP = ${BUILD_DIR}/extension_configuration/vcpkg.json
 endif
 
 GENERATOR ?=
@@ -22,8 +22,15 @@ CONFIGS_DIR = ./test/configs
 MKFILE_PATH := $(abspath $(lastword $(MAKEFILE_LIST)))
 PROJ_DIR := $(dir $(MKFILE_PATH))
 
+# Output tree root; override (relative or absolute) for build-tree isolation.
+BUILD_DIR ?= ./build
+# `override` so a command-line `BUILD_DIR=foo/` is also normalized.
+override BUILD_DIR := $(patsubst %/,%,${BUILD_DIR})
+
+CMAKE_VARS := -DDUCKDB_BUILD_DIR="${BUILD_DIR}"
+
 PYTHON ?= python3
-FORMAT_VENV ?= build/format-venv
+FORMAT_VENV ?= ${BUILD_DIR}/format-venv
 FORMAT_PYTHON := $(FORMAT_VENV)/bin/python
 FORMAT_SETUP_DEPS := format_venv
 
@@ -32,7 +39,7 @@ ifeq ($(OS),Windows_NT)
 EXE_SUFFIX := .exe
 endif
 UNITTEST_BINARY ?= test/unittest$(EXE_SUFFIX)
-SMOKE_UNITTEST ?= build/relassert/$(UNITTEST_BINARY)
+SMOKE_UNITTEST ?= ${BUILD_DIR}/relassert/$(UNITTEST_BINARY)
 UNITTEST_SLOW_FLAGS ?= --batch-timeout=1800 --track-runtime=300
 UNITTEST_HUGE_FLAGS ?= --batch-size=1 --workers=50% $(UNITTEST_SLOW_FLAGS)
 
@@ -50,9 +57,9 @@ export CI_TIDY_JOBS := $(shell jobs=$$(( $(CI_CPU_COUNT) * 25 / 100 )); [ $$jobs
 # Assume Ninja is the default generator (if missing), but verify ninja exists.
 # Cache Ninja detection so we only probe `ninja --version` once.
 ifeq ($(GEN),)
-NINJA_VERSION_FILE := build/ninja_version.txt
+NINJA_VERSION_FILE := ${BUILD_DIR}/ninja_version.txt
 ifeq ($(wildcard $(NINJA_VERSION_FILE)),)
-NINJA_DETECTED := $(strip $(shell mkdir -p build >/dev/null 2>&1; \
+NINJA_DETECTED := $(strip $(shell mkdir -p ${BUILD_DIR} >/dev/null 2>&1; \
 	v=$$(ninja --version 2>/dev/null | head -n 1); \
 	if [ -n "$$v" ]; then \
 		printf '%s\n' "$$v" > "$(NINJA_VERSION_FILE)"; \
@@ -221,7 +228,7 @@ ifneq ($(TIDY_BINARY),)
 	TIDY_BINARY_PARAMETER := -clang-tidy-binary ${TIDY_BINARY}
 endif
 CLANGD_TIDY_VERSION := 1.1.1
-CLANGD_TIDY_VENV ?= $(abspath build/clangd-tidy-venv)
+CLANGD_TIDY_VENV ?= $(abspath ${BUILD_DIR}/clangd-tidy-venv)
 ifeq ($(CLANGD_TIDY_BINARY),)
 ifneq ($(wildcard $(CLANGD_TIDY_VENV)/bin/clangd-tidy),)
 CLANGD_TIDY_BINARY := $(CLANGD_TIDY_VENV)/bin/clangd-tidy
@@ -386,7 +393,7 @@ ifneq ("${VCPKG_TARGET_TRIPLET}", "")
 	CMAKE_VARS_BUILD:=${CMAKE_VARS_BUILD} -DVCPKG_TARGET_TRIPLET='${VCPKG_TARGET_TRIPLET}'
 endif
 ifeq (${USE_MERGED_VCPKG_MANIFEST}, 1)
-	CMAKE_VARS:=${CMAKE_VARS} -DVCPKG_MANIFEST_DIR='${PROJ_DIR}build/extension_configuration'
+	CMAKE_VARS:=${CMAKE_VARS} -DVCPKG_MANIFEST_DIR='$(abspath ${BUILD_DIR}/extension_configuration)'
 endif
 sync_extensions_into =
 vcpkg_cmake_flag =
@@ -416,9 +423,12 @@ ifdef DUCKDB_PLATFORM
 endif
 
 clean:
-	rm -rf build
+	@if [ -z "${BUILD_DIR}" ] || [ "${BUILD_DIR}" = "/" ]; then \
+		echo "refusing to clean: BUILD_DIR is empty or '/'"; exit 1; \
+	fi
+	rm -rf ${BUILD_DIR}
 
-EXTENSION_REPOSITORY_PATH ?= build/release/repository
+EXTENSION_REPOSITORY_PATH ?= ${BUILD_DIR}/release/repository
 EXTENSION_BUCKET ?= duckdb-core-extensions
 
 .PHONY: upload-extensions
@@ -426,18 +436,18 @@ upload-extensions:
 	CI_CPU_COUNT="$(CI_CPU_COUNT)" ./scripts/extension-upload-repository.sh "$(EXTENSION_REPOSITORY_PATH)" "$(EXTENSION_BUCKET)"
 
 define cmake_build
-	mkdir -p ./$(1) && \
-	$(call sync_extensions_into,${PROJ_DIR}$(1)) \
+	mkdir -p $(1) && \
+	$(call sync_extensions_into,$(abspath $(1))) \
 	cd $(1) && \
-	cmake $(GENERATOR) $(FORCE_COLOR) ${WARNINGS_AS_ERRORS} ${FORCE_32_BIT_FLAG} ${DISABLE_UNITY_FLAG} ${DISABLE_SANITIZER_FLAG} ${STATIC_LIBCPP} ${CMAKE_VARS} ${CMAKE_VARS_BUILD} $(call vcpkg_cmake_flag,${PROJ_DIR}$(1)) $(3) -DCMAKE_BUILD_TYPE=$(2) ../.. && \
+	cmake $(GENERATOR) $(FORCE_COLOR) ${WARNINGS_AS_ERRORS} ${FORCE_32_BIT_FLAG} ${DISABLE_UNITY_FLAG} ${DISABLE_SANITIZER_FLAG} ${STATIC_LIBCPP} ${CMAKE_VARS} ${CMAKE_VARS_BUILD} $(call vcpkg_cmake_flag,$(abspath $(1))) $(3) -DCMAKE_BUILD_TYPE=$(2) ${PROJ_DIR} && \
 	$(NINJA_BUILD_WRAPPER) cmake --build . --config $(2)
 endef
 
 debug: ${EXTENSION_CONFIG_STEP}
-	$(call cmake_build,build/debug,Debug,-DDEBUG_MOVE=1)
+	$(call cmake_build,${BUILD_DIR}/debug,Debug,-DDEBUG_MOVE=1)
 
 release: ${EXTENSION_CONFIG_STEP}
-	$(call cmake_build,build/release,Release,${FORCE_WARN_UNUSED_FLAG})
+	$(call cmake_build,${BUILD_DIR}/release,Release,${FORCE_WARN_UNUSED_FLAG})
 
 WINDOWS_GENERATOR_PLATFORM ?= x64
 BUNDLED_EXTENSIONS_CONFIGS ?= $(PWD)/.github/config/bundled_extensions.cmake
@@ -452,102 +462,102 @@ windows_release_32: ${EXTENSION_CONFIG_STEP}
 	$(NINJA_BUILD_WRAPPER) cmake --build . --config Release
 
 wasm_mvp: ${EXTENSION_CONFIG_STEP}
-	mkdir -p ./build/wasm_mvp && \
-	emcmake cmake $(GENERATOR) -DWASM_LOADABLE_EXTENSIONS=1 -DBUILD_EXTENSIONS_ONLY=1 -Bbuild/wasm_mvp -DCMAKE_CXX_FLAGS="-DDUCKDB_CUSTOM_PLATFORM=wasm_mvp" -DDUCKDB_EXPLICIT_PLATFORM="wasm_mvp" ${COMMON_CMAKE_VARS} ${TOOLCHAIN_FLAGS} && \
-	emmake make -j${CI_BUILD_JOBS} -Cbuild/wasm_mvp
+	mkdir -p ${BUILD_DIR}/wasm_mvp && \
+	emcmake cmake $(GENERATOR) -DWASM_LOADABLE_EXTENSIONS=1 -DBUILD_EXTENSIONS_ONLY=1 -B${BUILD_DIR}/wasm_mvp -DCMAKE_CXX_FLAGS="-DDUCKDB_CUSTOM_PLATFORM=wasm_mvp" -DDUCKDB_EXPLICIT_PLATFORM="wasm_mvp" ${COMMON_CMAKE_VARS} ${TOOLCHAIN_FLAGS} && \
+	emmake make -j${CI_BUILD_JOBS} -C${BUILD_DIR}/wasm_mvp
 
 wasm_eh: WASM_EH_CMAKE_VARS=-DBUILD_EXTENSIONS_ONLY=1
 wasm_ci: WASM_EH_CMAKE_VARS=
 wasm_eh wasm_ci: ${EXTENSION_CONFIG_STEP}
-	mkdir -p ./build/wasm_eh && \
-	emcmake cmake $(GENERATOR) -DWASM_LOADABLE_EXTENSIONS=1 $(WASM_EH_CMAKE_VARS) -Bbuild/wasm_eh -DCMAKE_CXX_FLAGS="-fwasm-exceptions -DDUCKDB_NO_THREADS=1 -DWEBDB_FAST_EXCEPTIONS=1 -DDUCKDB_CUSTOM_PLATFORM=wasm_eh" -DDUCKDB_EXPLICIT_PLATFORM="wasm_eh" ${COMMON_CMAKE_VARS} ${TOOLCHAIN_FLAGS} && \
-	emmake make -j${CI_BUILD_JOBS} -Cbuild/wasm_eh
+	mkdir -p ${BUILD_DIR}/wasm_eh && \
+	emcmake cmake $(GENERATOR) -DWASM_LOADABLE_EXTENSIONS=1 $(WASM_EH_CMAKE_VARS) -B${BUILD_DIR}/wasm_eh -DCMAKE_CXX_FLAGS="-fwasm-exceptions -DDUCKDB_NO_THREADS=1 -DWEBDB_FAST_EXCEPTIONS=1 -DDUCKDB_CUSTOM_PLATFORM=wasm_eh" -DDUCKDB_EXPLICIT_PLATFORM="wasm_eh" ${COMMON_CMAKE_VARS} ${TOOLCHAIN_FLAGS} && \
+	emmake make -j${CI_BUILD_JOBS} -C${BUILD_DIR}/wasm_eh
 
 wasm_threads: ${EXTENSION_CONFIG_STEP}
-	mkdir -p ./build/wasm_threads && \
-	emcmake cmake $(GENERATOR) -DWASM_LOADABLE_EXTENSIONS=1 -DBUILD_EXTENSIONS_ONLY=1 -Bbuild/wasm_threads -DCMAKE_CXX_FLAGS="-fwasm-exceptions -DWEBDB_FAST_EXCEPTIONS=1 -DWITH_WASM_THREADS=1 -DWITH_WASM_SIMD=1 -DWITH_WASM_BULK_MEMORY=1 -DDUCKDB_CUSTOM_PLATFORM=wasm_threads -pthread" -DDUCKDB_EXPLICIT_PLATFORM="wasm_threads" ${COMMON_CMAKE_VARS} -DUSE_WASM_THREADS=1 -DCMAKE_C_FLAGS="-pthread" ${TOOLCHAIN_FLAGS} && \
-	emmake make -j${CI_BUILD_JOBS} -Cbuild/wasm_threads
+	mkdir -p ${BUILD_DIR}/wasm_threads && \
+	emcmake cmake $(GENERATOR) -DWASM_LOADABLE_EXTENSIONS=1 -DBUILD_EXTENSIONS_ONLY=1 -B${BUILD_DIR}/wasm_threads -DCMAKE_CXX_FLAGS="-fwasm-exceptions -DWEBDB_FAST_EXCEPTIONS=1 -DWITH_WASM_THREADS=1 -DWITH_WASM_SIMD=1 -DWITH_WASM_BULK_MEMORY=1 -DDUCKDB_CUSTOM_PLATFORM=wasm_threads -pthread" -DDUCKDB_EXPLICIT_PLATFORM="wasm_threads" ${COMMON_CMAKE_VARS} -DUSE_WASM_THREADS=1 -DCMAKE_C_FLAGS="-pthread" ${TOOLCHAIN_FLAGS} && \
+	emmake make -j${CI_BUILD_JOBS} -C${BUILD_DIR}/wasm_threads
 
 cldebug: ${EXTENSION_CONFIG_STEP}
-	$(call cmake_build,build/cldebug,Debug,-DENABLE_SANITIZER=0 -DENABLE_UBSAN=0)
+	$(call cmake_build,${BUILD_DIR}/cldebug,Debug,-DENABLE_SANITIZER=0 -DENABLE_UBSAN=0)
 
 clreldebug:
-	mkdir -p ./build/clreldebug && \
-	cd build/clreldebug && \
-	cmake $(GENERATOR) $(FORCE_COLOR) ${WARNINGS_AS_ERRORS} ${FORCE_32_BIT_FLAG} ${DISABLE_UNITY_FLAG} ${STATIC_LIBCPP} ${CMAKE_VARS} -DBUILD_FTS_EXTENSION=1 -DENABLE_SANITIZER=0 -DENABLE_UBSAN=0 -DCMAKE_BUILD_TYPE=RelWithDebInfo ../.. && \
+	mkdir -p ${BUILD_DIR}/clreldebug && \
+	cd ${BUILD_DIR}/clreldebug && \
+	cmake $(GENERATOR) $(FORCE_COLOR) ${WARNINGS_AS_ERRORS} ${FORCE_32_BIT_FLAG} ${DISABLE_UNITY_FLAG} ${STATIC_LIBCPP} ${CMAKE_VARS} -DBUILD_FTS_EXTENSION=1 -DENABLE_SANITIZER=0 -DENABLE_UBSAN=0 -DCMAKE_BUILD_TYPE=RelWithDebInfo ${PROJ_DIR} && \
 	$(NINJA_BUILD_WRAPPER) cmake --build . --config RelWithDebInfo
 
-SYNC_OUTPUT_DIR ?= build
+SYNC_OUTPUT_DIR ?= ${BUILD_DIR}
 sync_out_of_tree_extensions:
 	$(PYTHON) scripts/sync_out_of_tree_extensions.py $(if $(BUILD_EXTENSIONS),--build-extensions "$(BUILD_EXTENSIONS)") $(if $(EXTENSION_CONFIGS),--extension-configs "$(EXTENSION_CONFIGS)") --output-dir '${PROJ_DIR}$(SYNC_OUTPUT_DIR)'
 
-extension_configuration: build/extension_configuration/vcpkg.json
+extension_configuration: ${BUILD_DIR}/extension_configuration/vcpkg.json
 
 extension/extension_config_local.cmake:
 	touch extension/extension_config_local.cmake
 
-build/extension_configuration/vcpkg.json: extension/extension_config_local.cmake extension/extension_config.cmake
-	mkdir -p ./build/extension_configuration && \
-	cd build/extension_configuration && \
-	cmake $(GENERATOR) $(FORCE_COLOR) ${CMAKE_VARS} -DEXTENSION_CONFIG_BUILD=TRUE -DVCPKG_BUILD=1 -DCMAKE_BUILD_TYPE=Release ../.. && \
+${BUILD_DIR}/extension_configuration/vcpkg.json: extension/extension_config_local.cmake extension/extension_config.cmake
+	mkdir -p ${BUILD_DIR}/extension_configuration && \
+	cd ${BUILD_DIR}/extension_configuration && \
+	cmake $(GENERATOR) $(FORCE_COLOR) ${CMAKE_VARS} -DEXTENSION_CONFIG_BUILD=TRUE -DVCPKG_BUILD=1 -DCMAKE_BUILD_TYPE=Release ${PROJ_DIR} && \
 	$(NINJA_BUILD_WRAPPER) cmake --build . --config Release
 
 unittest: debug
-	$(PYTHON) scripts/ci/run_tests.py build/debug/$(UNITTEST_BINARY) $(T)
+	$(PYTHON) scripts/ci/run_tests.py ${BUILD_DIR}/debug/$(UNITTEST_BINARY) $(T)
 
 unittest_reldebug:
-	$(PYTHON) scripts/ci/run_tests.py build/reldebug/$(UNITTEST_BINARY) $(T)
+	$(PYTHON) scripts/ci/run_tests.py ${BUILD_DIR}/reldebug/$(UNITTEST_BINARY) $(T)
 
 ifneq ($(SKIP_BUILD),1)
 unittest_release: release
 endif
 unittest_release:
-	$(PYTHON) scripts/ci/run_tests.py build/release/$(UNITTEST_BINARY) $(T)
+	$(PYTHON) scripts/ci/run_tests.py ${BUILD_DIR}/release/$(UNITTEST_BINARY) $(T)
 
 .PHONY: alltest_release_tag test_release_tag
 alltest_release_tag:
-	$(PYTHON) scripts/ci/run_tests.py --test-flags="--select-tag release" ./build/release/$(UNITTEST_BINARY) '*' $(T)
+	$(PYTHON) scripts/ci/run_tests.py --test-flags="--select-tag release" ${BUILD_DIR}/release/$(UNITTEST_BINARY) '*' $(T)
 
 test_release_tag:
-	$(PYTHON) scripts/ci/run_tests.py --test-flags="--select-tag release" ./build/release/$(UNITTEST_BINARY) $(T)
+	$(PYTHON) scripts/ci/run_tests.py --test-flags="--select-tag release" ${BUILD_DIR}/release/$(UNITTEST_BINARY) $(T)
 
 unittest_relassert:
-	$(PYTHON) scripts/ci/run_tests.py build/relassert/$(UNITTEST_BINARY) $(T)
+	$(PYTHON) scripts/ci/run_tests.py ${BUILD_DIR}/relassert/$(UNITTEST_BINARY) $(T)
 
 smoke:
 	$(PYTHON) scripts/ci/run_tests.py --batch-timeout 120 --test-list test/smoke_tests.list $(SMOKE_UNITTEST) $(T)
 
 unittestarrow:
-	$(PYTHON) scripts/ci/run_tests.py build/debug/$(UNITTEST_BINARY) "[arrow]"
+	$(PYTHON) scripts/ci/run_tests.py ${BUILD_DIR}/debug/$(UNITTEST_BINARY) "[arrow]"
 
 allunit:
-	$(PYTHON) scripts/ci/run_tests.py --workers=50% build/release/$(UNITTEST_BINARY) '*' $(T)
+	$(PYTHON) scripts/ci/run_tests.py --workers=50% ${BUILD_DIR}/release/$(UNITTEST_BINARY) '*' $(T)
 ifndef CI
 allunit: release
 endif
 
 unittest_threadsan: export TSAN_OPTIONS ?= "suppressions=./.sanitizer-thread-suppressions.txt"
 unittest_threadsan: unittest_reldebug
-	$(PYTHON) scripts/ci/run_tests.py $(UNITTEST_HUGE_FLAGS) build/reldebug/$(UNITTEST_BINARY) "[intraquery],[interquery],[detailed_profiler],test/sql/tpch/tpch_sf01.test_slow" $(T)
-	$(PYTHON) scripts/ci/run_tests.py $(UNITTEST_HUGE_FLAGS) --test-flags="--force-storage --force-reload" build/reldebug/$(UNITTEST_BINARY) "[interquery]" $(T)
+	$(PYTHON) scripts/ci/run_tests.py $(UNITTEST_HUGE_FLAGS) ${BUILD_DIR}/reldebug/$(UNITTEST_BINARY) "[intraquery],[interquery],[detailed_profiler],test/sql/tpch/tpch_sf01.test_slow" $(T)
+	$(PYTHON) scripts/ci/run_tests.py $(UNITTEST_HUGE_FLAGS) --test-flags="--force-storage --force-reload" ${BUILD_DIR}/reldebug/$(UNITTEST_BINARY) "[interquery]" $(T)
 
 .PHONY: unittest_threadsan_extra
 unittest_threadsan_extra: export TSAN_OPTIONS ?= "suppressions=./.sanitizer-thread-suppressions.txt"
 unittest_threadsan_extra: unittest_reldebug
-	$(PYTHON) scripts/ci/run_tests.py --batch-size=1 --workers=50% --batch-timeout=1800 --track-runtime=300 --test-flags="--force-storage" build/reldebug/$(UNITTEST_BINARY) "[interquery]" $(T)
+	$(PYTHON) scripts/ci/run_tests.py --batch-size=1 --workers=50% --batch-timeout=1800 --track-runtime=300 --test-flags="--force-storage" ${BUILD_DIR}/reldebug/$(UNITTEST_BINARY) "[interquery]" $(T)
 
 docs:
-	mkdir -p ./build/docs && \
+	mkdir -p ${BUILD_DIR}/docs && \
 	doxygen Doxyfile
 
 doxygen: docs
-	open build/docs/html/index.html
+	open ${BUILD_DIR}/docs/html/index.html
 
 reldebug: ${EXTENSION_CONFIG_STEP}
-	$(call cmake_build,build/reldebug,RelWithDebInfo,)
+	$(call cmake_build,${BUILD_DIR}/reldebug,RelWithDebInfo,)
 
 relassert: ${EXTENSION_CONFIG_STEP}
-	$(call cmake_build,build/relassert,RelWithDebInfo,-DFORCE_ASSERT=1)
+	$(call cmake_build,${BUILD_DIR}/relassert,RelWithDebInfo,-DFORCE_ASSERT=1)
 
 .PHONY: relassert-artifact
 
@@ -564,10 +574,10 @@ release-artifact:
 symbol-checks: symbol-leakage-check banned-symbol-check
 
 symbol-leakage-check:
-	$(PYTHON) scripts/exported_symbols_check.py build/release/src/libduckdb*.so
+	$(PYTHON) scripts/exported_symbols_check.py ${BUILD_DIR}/release/src/libduckdb*.so
 
 banned-symbol-check:
-	$(PYTHON) scripts/banned_symbols_check.py --directory build/release/src
+	$(PYTHON) scripts/banned_symbols_check.py --directory ${BUILD_DIR}/release/src
 
 define ensure_apt_commands
 	missing=0; \
@@ -655,17 +665,17 @@ format_venv:
 	@$(FORMAT_PYTHON) -m pip show clang_format >/dev/null 2>&1 || $(FORMAT_PYTHON) -m pip install clang_format==11.0.1
 
 benchmark:
-	mkdir -p ./build/release && \
-	cd build/release && \
-	cmake $(GENERATOR) $(FORCE_COLOR) ${WARNINGS_AS_ERRORS} ${FORCE_WARN_UNUSED_FLAG} ${FORCE_32_BIT_FLAG} ${DISABLE_UNITY_FLAG} ${DISABLE_SANITIZER_FLAG} ${STATIC_LIBCPP} ${CMAKE_VARS} -DBUILD_BENCHMARKS=1 -DCMAKE_BUILD_TYPE=Release ../.. && \
+	mkdir -p ${BUILD_DIR}/release && \
+	cd ${BUILD_DIR}/release && \
+	cmake $(GENERATOR) $(FORCE_COLOR) ${WARNINGS_AS_ERRORS} ${FORCE_WARN_UNUSED_FLAG} ${FORCE_32_BIT_FLAG} ${DISABLE_UNITY_FLAG} ${DISABLE_SANITIZER_FLAG} ${STATIC_LIBCPP} ${CMAKE_VARS} -DBUILD_BENCHMARKS=1 -DCMAKE_BUILD_TYPE=Release ${PROJ_DIR} && \
 	$(NINJA_BUILD_WRAPPER) cmake --build . --config Release
 
 
 tidy-check:
-	mkdir -p ./build/tidy && \
-	cd build/tidy && \
-	cmake -DCLANG_TIDY=1 -DDISABLE_UNITY=1 -DBUILD_EXTENSIONS=parquet -DBUILD_SHELL=0 ../.. && \
-	$(PYTHON) ../../scripts/run-clang-tidy.py -quiet -j $(CI_CPU_COUNT) ${TIDY_BINARY_PARAMETER} ${TIDY_PERFORM_CHECKS}
+	mkdir -p ${BUILD_DIR}/tidy && \
+	cd ${BUILD_DIR}/tidy && \
+	cmake -DCLANG_TIDY=1 -DDISABLE_UNITY=1 -DBUILD_EXTENSIONS=parquet -DBUILD_SHELL=0 ${PROJ_DIR} && \
+	$(PYTHON) ${PROJ_DIR}scripts/run-clang-tidy.py -quiet -j $(CI_CPU_COUNT) ${TIDY_BINARY_PARAMETER} ${TIDY_PERFORM_CHECKS}
 
 install-clangd-tidy:
 	mkdir -p $(dir $(CLANGD_TIDY_VENV)) && \
@@ -673,24 +683,24 @@ install-clangd-tidy:
 	$(CLANGD_TIDY_VENV)/bin/pip install --upgrade 'clangd-tidy==$(CLANGD_TIDY_VERSION)'
 
 tidy-check-clangd:
-	mkdir -p ./build/tidy && \
-	cd build/tidy && \
-	cmake $(GENERATOR) $(FORCE_COLOR) ${STATIC_LIBCPP} ${CMAKE_VARS} -DCLANG_TIDY=1 -DDISABLE_UNITY=1 -DBUILD_EXTENSIONS=parquet -DBUILD_SHELL=0 ../.. && \
+	mkdir -p ${BUILD_DIR}/tidy && \
+	cd ${BUILD_DIR}/tidy && \
+	cmake $(GENERATOR) $(FORCE_COLOR) ${STATIC_LIBCPP} ${CMAKE_VARS} -DCLANG_TIDY=1 -DDISABLE_UNITY=1 -DBUILD_EXTENSIONS=parquet -DBUILD_SHELL=0 ${PROJ_DIR} && \
 	trap 'rm -rf ./pchs' EXIT && \
-	$(PYTHON) -u ../../scripts/run-clangd-tidy.py -j $(CI_TIDY_JOBS) ${CLANGD_TIDY_BINARY_PARAMETER} ${CLANGD_BINARY_PARAMETER} ${CLANGD_TIDY_QUERY_DRIVER_PARAMETER}
+	$(PYTHON) -u ${PROJ_DIR}scripts/run-clangd-tidy.py -j $(CI_TIDY_JOBS) ${CLANGD_TIDY_BINARY_PARAMETER} ${CLANGD_BINARY_PARAMETER} ${CLANGD_TIDY_QUERY_DRIVER_PARAMETER}
 
 tidy-check-diff:
-	mkdir -p ./build/tidy && \
-	cd build/tidy && \
-	cmake -DCLANG_TIDY=1 -DDISABLE_UNITY=1 -DBUILD_EXTENSIONS=parquet -DBUILD_SHELL=0 ../.. && \
-	cd ../../ && \
-	git diff origin/${GIT_BASE_BRANCH} . ':(exclude)tools' ':(exclude)extension' ':(exclude)test' ':(exclude)benchmark' ':(exclude)third_party' ':(exclude)src/common/adbc' ':(exclude)src/main/capi' | $(PYTHON) scripts/clang-tidy-diff.py -path build/tidy -quiet -j $(CI_CPU_COUNT) ${TIDY_BINARY_PARAMETER} ${TIDY_PERFORM_CHECKS} -p1
+	mkdir -p ${BUILD_DIR}/tidy && \
+	cd ${BUILD_DIR}/tidy && \
+	cmake -DCLANG_TIDY=1 -DDISABLE_UNITY=1 -DBUILD_EXTENSIONS=parquet -DBUILD_SHELL=0 ${PROJ_DIR} && \
+	cd ${PROJ_DIR} && \
+	git diff origin/${GIT_BASE_BRANCH} . ':(exclude)tools' ':(exclude)extension' ':(exclude)test' ':(exclude)benchmark' ':(exclude)third_party' ':(exclude)src/common/adbc' ':(exclude)src/main/capi' | $(PYTHON) scripts/clang-tidy-diff.py -path ${BUILD_DIR}/tidy -quiet -j $(CI_CPU_COUNT) ${TIDY_BINARY_PARAMETER} ${TIDY_PERFORM_CHECKS} -p1
 
 tidy-fix:
-	mkdir -p ./build/tidy && \
-	cd build/tidy && \
-	cmake -DCLANG_TIDY=1 -DDISABLE_UNITY=1 -DBUILD_EXTENSIONS=parquet -DBUILD_SHELL=0 ../.. && \
-	$(PYTHON) ../../scripts/run-clang-tidy.py -fix
+	mkdir -p ${BUILD_DIR}/tidy && \
+	cd ${BUILD_DIR}/tidy && \
+	cmake -DCLANG_TIDY=1 -DDISABLE_UNITY=1 -DBUILD_EXTENSIONS=parquet -DBUILD_SHELL=0 ${PROJ_DIR} && \
+	$(PYTHON) ${PROJ_DIR}scripts/run-clang-tidy.py -fix
 
 test_compile: # test compilation of individual cpp files
 	$(PYTHON) scripts/test_compile.py
@@ -739,10 +749,10 @@ third_party/sqllogictest:
 
 sqlite: release | third_party/sqllogictest
 	git --git-dir third_party/sqllogictest/.git pull
-	$(PYTHON) scripts/ci/run_tests.py ./build/release/$(UNITTEST_BINARY) "[sqlitelogic]"
+	$(PYTHON) scripts/ci/run_tests.py ${BUILD_DIR}/release/$(UNITTEST_BINARY) "[sqlitelogic]"
 
 sqlsmith: debug
-	./build/debug/third_party/sqlsmith/sqlsmith --duckdb=:memory:
+	${BUILD_DIR}/debug/third_party/sqlsmith/sqlsmith --duckdb=:memory:
 
 # Bloaty: a size profiler for binaries, is a project backed by Google engineers, https://github.com/google/bloaty for more info
 # works both on executable, libraries (-> .duckdb_extension) and on WebAssembly
@@ -752,14 +762,14 @@ bloaty/bloaty:
 	mv bloaty/build/bloaty bloaty/bloaty
 
 bloaty: reldebug bloaty/bloaty
-	cd build/reldebug && dsymutil duckdb
-	./bloaty/bloaty  build/reldebug/duckdb -d symbols -n 20 --debug-file=build/reldebug/duckdb.dSYM/Contents/Resources/DWARF/duckdb
-	# ./bloaty/bloaty  build/reldebug/extension/parquet/parquet.duckdb_extension -d symbols -n 20 # to execute on extension
+	cd ${BUILD_DIR}/reldebug && dsymutil duckdb
+	./bloaty/bloaty  ${BUILD_DIR}/reldebug/duckdb -d symbols -n 20 --debug-file=${BUILD_DIR}/reldebug/duckdb.dSYM/Contents/Resources/DWARF/duckdb
+	# ./bloaty/bloaty  ${BUILD_DIR}/reldebug/extension/parquet/parquet.duckdb_extension -d symbols -n 20 # to execute on extension
 
-# Generate compile commands without actually building
+# Generate compile commands without actually building.
 clangd:
-	cmake -DCMAKE_BUILD_TYPE=Debug ${CMAKE_VARS} -B .cache/clangd/debug .
-	cp .cache/clangd/debug/compile_commands.json .cache/clangd/compile_commands.json
+	cmake -DCMAKE_BUILD_TYPE=Debug ${CMAKE_VARS} -B ${BUILD_DIR}/clangd .
+	mkdir -p .cache/clangd && cp ${BUILD_DIR}/clangd/compile_commands.json .cache/clangd/compile_commands.json
 
 coverage-check:
 	./scripts/coverage_check.sh
@@ -779,13 +789,13 @@ generate-files:
 	$(MAKE) format-main
 
 bundle-setup:
-	cd build/release && \
+	cd ${BUILD_DIR}/release && \
 	rm -rf bundle && \
 	mkdir -p bundle && \
 	cp src/libduckdb_static.a bundle/. && \
 	cp third_party/*/libduckdb_*.a bundle/. && \
 	cp extension/libduckdb_generated_extension_loader.a bundle/. && \
-	cp extension/*/lib*_extension.a bundle/. && \
+	cp extension/*/lib*.a bundle/. && \
 	mkdir -p vcpkg_installed && \
 	find vcpkg_installed -name '*.a' -exec cp {} bundle/. \; && \
 	mkdir -p _deps && \
@@ -799,24 +809,24 @@ bundle-setup:
 	find . -name '*.a' -execdir ${AR} -x {} \;
 
 bundle-library-o: bundle-setup
-	cd build/release/bundle && \
+	cd ${BUILD_DIR}/release/bundle && \
 	echo ./*/*.o | xargs ${AR} cr ../libduckdb_bundle.a
 
 bundle-library-obj: bundle-setup
-	cd build/release/bundle && \
+	cd ${BUILD_DIR}/release/bundle && \
 	echo ./*/*.obj | xargs ${AR} cr ../libduckdb_bundle.a
 
 bundle-library: release
 	make bundle-library-o
 
 gather-libs: release
-	cd build/release && \
+	cd ${BUILD_DIR}/release && \
 	rm -rf libs && \
 	mkdir -p libs && \
 	cp src/libduckdb_static.a libs/. && \
 	cp third_party/*/libduckdb_*.a libs/. && \
 	cp extension/libduckdb_generated_extension_loader.a libs/. && \
-	cp extension/*/lib*_extension.a libs/.
+	cp extension/*/lib*.a libs/.
 
 #### Setup VCPKG to correct version 2025.12.12 tag is 84bab45d415d22042bd0b9081aea57f362da3f35
 vcpkg/scripts/buildsystems/vcpkg.cmake:

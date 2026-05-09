@@ -59,9 +59,13 @@ struct ExtensionRepository {
 	static constexpr const char *CORE_NIGHTLY_REPOSITORY_URL = "http://nightly-extensions.duckdb.org";
 	static constexpr const char *COMMUNITY_REPOSITORY_URL = "http://community-extensions.duckdb.org";
 
-	//! Debugging repositories (target local, relative paths that are produced by DuckDB's build system)
-	static constexpr const char *BUILD_DEBUG_REPOSITORY_PATH = "./build/debug/repository";
-	static constexpr const char *BUILD_RELEASE_REPOSITORY_PATH = "./build/release/repository";
+	//! Debugging repositories (target local, relative paths produced by DuckDB's build system).
+	//! DUCKDB_BUILD_DIR may be overridden via -D at compile time; defaults to "./build".
+#ifndef DUCKDB_BUILD_DIR
+#define DUCKDB_BUILD_DIR "./build"
+#endif
+	static constexpr const char *BUILD_DEBUG_REPOSITORY_PATH = DUCKDB_BUILD_DIR "/debug/repository";
+	static constexpr const char *BUILD_RELEASE_REPOSITORY_PATH = DUCKDB_BUILD_DIR "/release/repository";
 
 	//! The default is CORE
 	static constexpr const char *DEFAULT_REPOSITORY_URL = CORE_REPOSITORY_URL;
